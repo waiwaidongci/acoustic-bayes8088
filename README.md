@@ -12,8 +12,9 @@ GaussianNB与分层交叉验证、混淆矩阵和后验解释。为桐弦研究�
 2. 声检批次：创建/修改来源说明、查看样本、用真实业务字段追加记录；列表分页。
 3. 分析配置：冻结来源、参数和全部样本，进入Redis队列。
 4. 完整结果：真实算法摘要、专属诊断、全部CSV导出和可恢复失败态。
-5. 复检批注：分析师草案→负责人批准→阅读者下载批准快照。
-6. 审计：登录、来源修改、任务worker完成、业务说明批准等事件。
+5. 检修排产：结合完整折外后验与故障/处置损失表，在两类工位剩余工时内求整批期望损失最小的逐样本处置；支持重算、确认锁定、撤销释放、执行与全链路追查。
+6. 复检批注：分析师草案→负责人批准→阅读者下载批准快照。
+7. 审计：登录、来源修改、任务worker完成、业务说明批准、排产锁定与释放等事件。
 
 ## 快速启动
 
@@ -53,7 +54,7 @@ JWT有效期8小时；PBKDF2盐化哈希保存密码；角色每请求从数据�
 
 ## 实体与字段
 
-AcousticBatch / AcousticSample / ClassifierRun / InspectionNote 是核心实体；另有User和Audit。数据库实际表：`acoustic_batches` → `acoustic_samples` → `classifier_runs` → `inspection_notes`。样本以固定字段JSON保存，后端按以下字段严格验证，不接受未知字段替代必填值：均方根振幅（`rms`）、频谱质心 Hz（`centroid`）、峭度（`kurtosis`）、复核类型（`label`）。
+AcousticBatch / AcousticSample / ClassifierRun / InspectionNote 是核心实体；另有User和Audit。检修排产新增 MaintenanceStation / RepairAction / MaintenanceLossEntry / MaintenancePlan / MaintenancePlanLock。数据库实际表：`acoustic_batches` → `acoustic_samples` → `classifier_runs` → `inspection_notes`；排产侧：`maintenance_stations`、`maintenance_actions`、`maintenance_loss_table`、`maintenance_plans` → `maintenance_plan_locks`。样本以固定字段JSON保存，后端按以下字段严格验证，不接受未知字段替代必填值：均方根振幅（`rms`）、频谱质心 Hz（`centroid`）、峭度（`kurtosis`）、复核类型（`label`）。
 
 实体贯穿 `backend/src/models`、`schemas`、`services`、`controllers`、`routes`，以及 `frontend/src/api/research.js`、`stores/research.js` 和 `pages`。`Source.key` 与 `(Record.source_id, reference)` 为自然键；来源改名不会修改已冻结任务输入。业务说明在创建时保存结果快照，批准后从该快照导出。
 
@@ -67,6 +68,16 @@ GaussianNB与分层交叉验证、混淆矩阵和后验解释，全部计算位�
 分层交叉验证，每折只在训练行拟合均值与方差；后验概率是模型分布，不是检修结论。
 
 失败态：业务字段缺失/非有限数值、参数越界、样本不足、退化特征或结构错误均明确拒绝或将任务标failed，错误消息保存在任务中。可回到来源或配置修正后重新执行，历史失败记录保留。
+
+## 检修排产口径与并发安全
+
+每个样本在三种处置中择一：免检放行（不占工时）、快速复检（占 A 类快速复检工位 20 分钟/件）、停机检修（占 B 类停机检修工位 45 分钟/件）。单样本某动作的期望损失为完整折外后验向量与故障/处置损失表的加权和；整批选择建模为双约束多选背包，用稀疏字典动态规划求全局最优（同损失确定性破平），位于 `backend/src/services/planning.py`。
+
+- 方案创建即冻结工位口径、损失表与该研究的完整折外后验，并记录口径 SHA256 指纹；独立 worker 经 `planning:queue` 计算，崩溃后 worker 启动会把 `computing` 孤儿重新入队，重算不触碰任何锁定工时。
+- 计算容量 = 工位总工时 − 人工占用 − 其他方案未释放的锁定工时，从计算阶段就避免并发超订；确认时再以 `SELECT ... FOR UPDATE` 行级锁二次校验。
+- 计算期间人工占用、工位总工时或损失表变化，待确认方案判为过期（`stale`），确认返回 409，需重算刷新指纹。
+- 确认按 `(plan_id, station_id)` 唯一约束幂等写入锁定行，重复确认/重试不重复扣工时；撤销写 `released_at` 精确释放；只有「整批选择 + 工时锁定齐备」（confirmed）才能执行，执行幂等且不可撤销。
+- 排产页逐项展示采用的完整后验、各动作期望损失、选择原因、占用工位与两类工位剩余工时，并可导出整批 CSV；原研究、来源与批注工作流保持不变。
 
 已知边界：独立同分布、特征条件独立和高斯类条件是假设；后验未校准。演示数据刻意有分离度，准确率不代表真实设备效果。使用分层折外验证，不提供外部最终测试集。
 
@@ -105,4 +116,4 @@ backend/migrations/001_initial.sql
 
 共享枚举：`backend/src/constants/enums.py` 与 `frontend/src/constants/enums.js` 都定义 admin/analyst/viewer、queued/running/completed/failed、draft/approved。后端service检查对应字符串；README为全量值说明。共享前端组件table/status/chart/business跨总览、结果、配置与复核复用；actions hook和format utils负责交互/格式。后端errors与rate_limit是两个中间件。
 
-测试及截图在批根 `test-artifacts/gb-0041/`，不混入源码。独立算法oracle、HTTP完整流程和真实Playwright浏览器流程见该目录 `TESTING.md`。License：MIT。
+测试及截图在批根 `test-artifacts/gb-0041/`，不混入源码。独立算法 oracle（DP 对暴力枚举）、HTTP 完整流程与真实前端模块（Node + jsdom 驱动 ES Module）见该目录 `TESTING.md`。License：MIT。

@@ -7,10 +7,12 @@ from src.models.source import Source
 from src.models.record import Record
 from src.models.run import Run
 from src.models import note,audit
+from src.models import station,repair_action,loss_entry,plan,plan_lock
 from src.utils.security import hash_password
 from src.utils.serialization import now
 from src.services.runs import queue
 from src.services.domain_validation import validate_record
+from src.services.planning_catalog import ensure_catalog
 
 def seed_values(kind,index,batch,rng):
     if kind=='gaussian':
@@ -35,6 +37,7 @@ def counts(db):
 def seed():
     Base.metadata.create_all(engine);rng=random.Random(42);queued=[]
     with Session() as db:
+        ensure_catalog(db)
         for role in ('admin','analyst','viewer'):
             email=role+'@'+CONFIG['slug']+'.demo'
             if not db.scalar(select(User).where(User.email==email)):db.add(User(email=email,password_hash=hash_password('Research2026!'),role=role))

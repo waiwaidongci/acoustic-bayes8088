@@ -1,3 +1,6 @@
 -- SQLAlchemy metadata initializes tables idempotently.
 -- Domain tables: acoustic_batches, acoustic_samples, classifier_runs, inspection_notes.
 -- Unique natural keys: source.key; (record.source_id, record.reference).
+-- Planning tables (检修排产): maintenance_stations, maintenance_actions,
+-- maintenance_loss_table, maintenance_plans, maintenance_plan_locks.
+-- 工时锁定唯一键: (plan_id, station_id)；确认重试不重复扣减，撤销写 released_at 释放。

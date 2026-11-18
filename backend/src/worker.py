@@ -1,13 +1,13 @@
 import json,time,logging
 from redis import Redis
-from sqlalchemy import select
 from .config.database import Session
 from .config.settings import REDIS_URL,ARTIFACT_DIR
 from .models.run import Run
-from .models import source,record,user,note,audit
+from .models import audit
 from .services.algorithm import calculate
 from .services.audit import log
 from .services.export import csv_response
+from .services.plans import compute_plan,recover_orphans,PLAN_QUEUE
 queue=Redis.from_url(REDIS_URL)
 ARTIFACT_DIR.mkdir(parents=True,exist_ok=True)
 def execute(id):
@@ -27,8 +27,19 @@ def execute(id):
             log(db,'worker','run.failed',r.id,r.error)
         db.commit()
 def main():
+    # 启动恢复：上次中断时仍在计算的排产方案重新入队，确认锁定不受影响
+    try:
+        with Session() as db:ids=recover_orphans(db)
+        if ids:logging.warning('requeued orphan plans: %s',ids)
+    except Exception:logging.exception('plan recovery failed')
     while True:
         (ARTIFACT_DIR/'heartbeat').write_text(str(time.time()))
-        value=queue.blpop('analysis:queue',timeout=2)
+        # 两个队列轮流取，保证分析与排产都能被消费
+        value=queue.blpop(PLAN_QUEUE,timeout=1)
+        if value:
+            try:compute_plan(int(value[1]))
+            except Exception:logging.exception('planning job failed')
+            continue
+        value=queue.blpop('analysis:queue',timeout=1)
         if value:execute(int(value[1]))
 if __name__=='__main__':main()
